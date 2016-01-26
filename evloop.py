@@ -1,7 +1,10 @@
 # coding: utf-8
+import cpyutils.log
 import time
 import logging
-_LOGGER = logging.getLogger("[ELOOP]")
+import math
+_LOGGER = cpyutils.log.Log("ELOOP")
+# logging.getLogger("[ELOOP]")
 
 class Event_Periodical:
     _id = -1
@@ -29,12 +32,12 @@ class Event_Periodical:
         self.mute = mute
         self.repeat = repeat
         self.lastcall = None
-        
+
     def call(self, now):
         self.lastcall = now
         
         if not self.mute:
-            _LOGGER.debug("(@%.2f) executing event (%s) %s - time %.2f" % (_eventloop.time(), self.id, self.desc, self.t))
+            _LOGGER.debug("(@%.2f) executing event (%s) %s - time %.2f" % (now, self.id, self.description, self.t))
 
         if self.callback is not None:
             self.callback(*self.parameters)
@@ -44,46 +47,33 @@ class Event_Periodical:
 
     def next_sched(self, now):
         if self.repeat is None:
-            # It only happens one, when t... if now > t then there will not be any other occurrence
-            if now > self.t:
+            if self.lastcall is not None:
+                # If the event was called, the there is not any call more
                 return None
             return self.t
         else:
             return self.t
-            #last_called = self.last_called
-            #if last_called is None: last_called = 0
-            #return last_called + self.repeat + self.t
         
     def reprogram(self, t = None):
         self.t = t
 
     def __str__(self):
-        return "(EVENT %d@%.2f) %s" % (self.id, self.t, self.desc)
+        return "(EVENT %d@%.2f) %s" % (self.id, self.t, self.description)
 
 class Event(Event_Periodical):
     def __init__(self, t, callback = None, description = None, parameters = [], priority = Event_Periodical.PRIO_NORMAL, mute = False):
         Event_Periodical.__init__(self, t, None, callback, description, parameters, priority, mute)
         
-    #def next_sched(self):
-    #    last_called = self.last_called        
-    #    if last_called is None:
-    #        last_called = 0
-    #    
-    #    last_called = max(self.start, last_called)
-    #    return last_called + self.t
-    #
-    #def call(self):
-    #    global _eventloop
-    #    self.last_called = _eventloop.time()
-    #    Event.call(self)
-
 class EventLoop():
     def __init__(self):
         self.events = {}
         self.t = 0
+        self._extra_periodical_events = 5
+        self._current_extra_periodical_events = 0
+        self._walltime = 1000
         
-    def set_time(self, t):
-        self.t = t
+    #def set_time(self, t):
+    #    self.t = t
         
     def time(self):
         return self.t
@@ -94,6 +84,16 @@ class EventLoop():
     def add_event(self, event):
         if event.id in self.events:
             raise Exception("An event with id %s already exists" % event.id)
+
+        if event.t <= self.t:
+            if event.repeat is None:
+                # We do not let to include past events (if they are )
+                return None
+            else:
+                next_program = event.t + math.ceil((self.t - event.t) / event.repeat)
+                print "next program:", next_program
+                event.reprogram(next_program)
+            
         self.events[event.id] = event
         return event
     
@@ -105,25 +105,59 @@ class EventLoop():
     
     def _sort_events(self, now):
         forgotten_events = []
-        eventqueue = []
+        nexteventsqueue = []
+        periodical_events = 0
         for event_id, event in self.events.items():
             next_sched = event.next_sched(now)
             if next_sched is None:
                 forgotten_events.append(event_id)
+            else:
+                non_periodical_priority = 0
+                if event.repeat is not None:
+                    periodical_events += 1
+                    non_periodical_priority = 1
+                    
+                nexteventsqueue.append((event_id, next_sched, event.priority, non_periodical_priority))
                 
-            #
-            eventqueue.append((event_id, next_sched, event.priority))
-        print sorted(eventqueue, key = lambda x: (x[1], x[2]))
+        nexteventsqueue.sort(key = lambda x: (x[1], x[3], x[2]))
                 
         # Clean the events that are not being executed anymore
         for event_id in forgotten_events:
             self.cancel_event(event_id)
+            
+        return nexteventsqueue, periodical_events
     
     def loop(self):
         print str(self)
-        self._sort_events(self.t)
-        pass
-    
+        while True:
+            now = self.t
+            if now > self._walltime:
+                _LOGGER.info("walltime %.2f achieved" % self._walltime)
+                break
+            
+            next_events, periodical_events = self._sort_events(now)
+            
+            if len(next_events) > 0:
+                (ev_id, program_t,_ , _) = next_events[0]
+                
+                # will execute the first event whose time has just passed
+                if program_t <= now:
+                    self.events[ev_id].call(now)
+                    
+                    # The maximum of periodical events
+                    if periodical_events == len(next_events):
+                        self._current_extra_periodical_events += 1
+                    else:
+                        self._current_extra_periodical_events = 0
+                    if self._current_extra_periodical_events >= self._extra_periodical_events:
+                        _LOGGER.info("extra periodical events achieved")
+                        break
+                else:
+                    self.t = program_t                    
+            else:
+                _LOGGER.info("no more events")
+                break
+                        
     def __str__(self):
         retval = "Current Time: %f, Pending Events: %d" % (self.time(), len(self.events))
         if len(self.events) > 0:
@@ -136,12 +170,17 @@ class EventLoop():
                     when = "None"
                 retval = "%s\n%s" % (retval, "+%s [%s]" % (when, ev.description))
         return retval
+
+ev = EventLoop()
+    
+def create_new_event():
+    ev.add_event(Event(10, callback = create_new_event, description = "evento en el segundo 10"))
             
 if __name__ == '__main__':
-    ev = EventLoop()
-    ev.set_time(1)
+    # ev.set_time(1)
     ev.add_event(Event_Periodical(0, 1, description = "evento periodico cada 1s"))
-    ev.add_event(Event(2, "evento en el segundo 2"))
-    ev.add_event(Event(2, "evento repetido en el segundo 2", priority = Event.PRIO_HIGH))
+    ev.add_event(Event_Periodical(5, 3, description = "evento periodico que empieza en 5 cada 2s"))
+    ev.add_event(Event(2, description = "evento en el segundo 2"))
+    ev.add_event(Event(2, callback = create_new_event, description = "evento prioritario en el segundo 2", priority = Event.PRIO_HIGH))
     ev.loop()
     
