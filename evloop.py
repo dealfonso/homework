@@ -87,7 +87,7 @@ class Event_Generic(object):
         # and one of them happens after the other while has more priority
         #   * This can be related to the resolution of the loop in the RT eventloop
         #     but it is around 0.5 seconds.
-        self.t = int(t * 1000.0) * 0.001
+        self.t = int(t * 100.0) * 0.01
     
     def __str__(self):
         return "(EVENT %d@%.2f) %s" % (self.id, self.t, self.description)
@@ -106,7 +106,7 @@ class Event_Periodical(Event_Generic):
     def call(self, now):
         # The event will be called as usual, but it will be reprogrammed to be repeated according to the period of time
         super(self.__class__, self).call(now)
-        self.reprogram(now + self.repeat)
+        self.reprogram(self.t + self.repeat)
         
 class Event(Event_Generic):
     '''
