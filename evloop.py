@@ -1,16 +1,37 @@
 # coding: utf-8
+#
+# CLUES Python utils - Utils and General classes that spin off from CLUES
+# Copyright (C) 2015 - GRyCAP - Universitat Politecnica de Valencia
+# 
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
 import cpyutils.log
 import time
-import logging
-import math
+import threading
 _LOGGER = cpyutils.log.Log("ELOOP")
 
 def create_eventloop(rt = True):
     global _eventloop
     if rt:
-        _eventloop = __EventLoop_RT()
+        _eventloop = _EventLoop_RT()
     else:
-        _eventloop = __EventLoop()
+        _eventloop = _EventLoop_TimeStep()
+
+def set_eventloop(evloop):
+    global _eventloop
+    _eventloop = evloop
 
 def get_eventloop():
     global _eventloop
@@ -91,7 +112,7 @@ class Event_Generic(object):
     
     def __str__(self):
         return "(EVENT %d@%.2f) %s" % (self.id, self.t, self.description)
-
+    
 class Event_Periodical(Event_Generic):
     '''
     This class is used to implement events that happen each period of time
@@ -133,12 +154,13 @@ class Event_Simple(Event):
     def __init__(self, t, description, mute = False):
         super(self.__class__, self).__init__(t, callback = None, description = description, parameters = [], priority = Event_Generic.PRIO_NORMAL, mute = mute)        
 
-class __EventLoop(object):
+class _EventLoop(object):
     '''
     This class is used to implement a generic event loop that runs on time-steps. The time
         is simmulated and the eventloop just advances to the next event in the eventloop.
     '''
     def __init__(self):
+        self._lock = threading.Lock()
         self.events = {}
         self.t = 0
         self.t = self.time()
@@ -157,24 +179,30 @@ class __EventLoop(object):
         return self.t
     
     def add_event(self, event):
+        self._lock.acquire()
         # This method adds one event to the event loop. The event will be reprogramed to interpret the time
         #   in which the method is set to be executed to be relative to the moment in which the event is
         #   added i.e.: now.
         # It returns the event
         # It can raise an exception in case that one event with the same id already exists in the eventloop
         if event.id in self.events:
+            self._lock.release()
             raise Exception("An event with id %s already exists" % event.id)
 
         event.reprogram(event.t + self.time())
         self.events[event.id] = event
+        self._lock.release()
         return event
 
     def cancel_event(self, event_id):
         # This method cancels one event, by using its id. Returns True if the event was cancelled. Otherwise
         #   it returns False.
+        result = False
+        self._lock.acquire()
         if event_id in self.events:
             del self.events[event_id]
-            return True
+            result = True
+        self._lock.release()
         return False
     
     def _sort_events(self, now):
@@ -184,6 +212,8 @@ class __EventLoop(object):
         #   that should be executed in the future.
         forgotten_events = []
         nexteventsqueue = []
+
+        self._lock.acquire()
         for event_id, event in self.events.items():
             next_sched = event.next_sched(now)
             if next_sched is None:
@@ -193,16 +223,19 @@ class __EventLoop(object):
                 
         # Order according to 1: the time, 2: priority
         nexteventsqueue.sort(key = lambda x: (x[1], x[2]))
+        self._lock.release()
 
         # Clean the events that are not being executed anymore
         for event_id in forgotten_events:
             self.cancel_event(event_id)
-            
+        
         return [ (x,y) for (x, y, _) in nexteventsqueue ]
     
     def _progress_to_time(self, t):
         # This method is used to make the time advance in order to be more near to one time
+        self._lock.acquire()
         self.t = t
+        self._lock.release()
     
     def loop(self):
         # This is the main loop of events. The events will be executed in order, as long as the time in
@@ -220,7 +253,10 @@ class __EventLoop(object):
                 
                 # will execute the first event whose time has just passed
                 if program_t <= now:
-                    self.events[ev_id].call(now)
+                    self._lock.acquire()
+                    ev = self.events[ev_id]
+                    self._lock.release()
+                    ev.call(now)
                 else:
                     self._progress_to_time(program_t)
             else:
@@ -240,24 +276,35 @@ class __EventLoop(object):
                 retval = "%s\n%s" % (retval, "+%s [%s]" % (when, ev.description))
         return retval
 
-class __EventLoop_RT(__EventLoop):
+class _EventLoop_TimeStep(_EventLoop):
+    '''
+    This class is used to create an eventloop that advances in timesteps, instead of advancing
+        on the time of the events. In this way, the events happen between two different moments.
+        So the events are not executed in the moment that they should be executed
+    '''
+    def __init__(self):
+        _EventLoop.__init__(self)
+        self.resolution = 0.5
+
+    def set_resolution(self, resolution):
+        # This method sets the resolution of the time for the eventloop.
+        self.resolution = resolution
+
+    def _progress_to_time(self, t):
+        self._lock.acquire()
+        self.t = self.t + self.resolution
+        self._lock.release()
+
+class _EventLoop_RT(_EventLoop_TimeStep):
     '''
     This class is used to create an eventloop that is executed in real time. The time-steps are
         real time units and the time is interpreted in seconds.
     '''
-    def __init__(self):
-        super(self.__class__, self).__init__()
-        self.resolution = 0.5
-    
     def time(self):
         # The current time for this eventloop is based on the realtime, but we are
         #   substracting the init time in order to get the notion of a local time.
         return time.time() - self.t
     
-    def set_resolution(self, resolution):
-        # This method sets the resolution of the time for the eventloop.
-        self.resolution = resolution
-
     def _progress_to_time(self, t):
         # The way to make that the time is more near to a time "t" in a real-time
         #   eventloop is just wait. We calculate an addapatative wait time in order
@@ -265,13 +312,47 @@ class __EventLoop_RT(__EventLoop):
         now = self.time()
         tsleep = self.resolution - (now - int(now / self.resolution) * self.resolution)
         time.sleep(tsleep)
+       
+class _EventLoop_RTT(_EventLoop_RT):
+    def __init__(self):
+        _EventLoop_RT.__init__(self)
+        self.next_event = None
+    
+    def add_event(self, event):
+        ev = _EventLoop_RT.add_event(self, event)
+
+        self._lock.acquire()
+        
+        # Now we will signal the alarm in order to evaluate the event queue again
+        if self.next_event is not None:
+            self.next_event.set()
+        
+        self._lock.release()
+        
+        return ev
+    
+    def _progress_to_time(self, t):
+        self._lock.acquire()
+        
+        if self.next_event is not None:
+            # This CANNOT happen, but it will signal the event just in case
+            self.next_event.set()
+
+        self.next_event = threading.Event()
+        self._lock.release()
+
+        now = self.time()
+        tsignal = t - now
+
+        self.next_event.wait(tsignal)
             
 if __name__ == '__main__':
     def create_new_event():
         get_eventloop().add_event(Event(10, description = "event in second %.1f" % (get_eventloop().time() + 10.0)))
 
-    create_eventloop(True)
-    get_eventloop().set_resolution(0.5)
+    # create_eventloop(False)
+    set_eventloop(_EventLoop_RTT())
+    # get_eventloop().set_resolution(0.5)
     #create_eventloop(False)
     get_eventloop().add_event(Event_Periodical(0, 1, description = "periodical event each 1s"))
     get_eventloop().add_event(Event_Periodical(5, 3, description = "periodical event that starts in second 5, each 2s"))
